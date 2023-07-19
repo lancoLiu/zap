@@ -28,7 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	. "go.uber.org/zap/zapcore"
 )
@@ -113,6 +113,26 @@ func TestEncoderConfiguration(t *testing.T) {
 			},
 			expectedJSON:    `{"L":"info","T":0,"N":"main","C":"foo.go:42","F":"foo.Foo","M":"hello","S":"fake-stack"}` + "\n",
 			expectedConsole: "0\tinfo\tmain\tfoo.go:42\tfoo.Foo\thello\nfake-stack\n",
+		},
+		{
+			desc: "skip line ending if SkipLineEnding is 'true'",
+			cfg: EncoderConfig{
+				LevelKey:       "L",
+				TimeKey:        "T",
+				MessageKey:     "M",
+				NameKey:        "N",
+				CallerKey:      "C",
+				FunctionKey:    "F",
+				StacktraceKey:  "S",
+				LineEnding:     base.LineEnding,
+				SkipLineEnding: true,
+				EncodeTime:     base.EncodeTime,
+				EncodeDuration: base.EncodeDuration,
+				EncodeLevel:    base.EncodeLevel,
+				EncodeCaller:   base.EncodeCaller,
+			},
+			expectedJSON:    `{"L":"info","T":0,"N":"main","C":"foo.go:42","F":"foo.Foo","M":"hello","S":"fake-stack"}`,
+			expectedConsole: "0\tinfo\tmain\tfoo.go:42\tfoo.Foo\thello\nfake-stack",
 		},
 		{
 			desc: "skip level if LevelKey is omitted",

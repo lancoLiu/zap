@@ -7,36 +7,37 @@ on:
   pull_request:
     branches: ['*']
 
+permissions:
+  contents: read
+
 jobs:
 
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ["1.15.x", "1.16.x"]
+        go: ["1.19.x", "1.20.x"]
         include:
-        - go: 1.16.x
+        - go: 1.20.x
           latest: true
 
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
     - name: Setup Go
-      uses: actions/setup-go@v2
+      uses: actions/setup-go@v3
       with:
         go-version: ${{ matrix.go }}
-
-    - name: Checkout code
-      uses: actions/checkout@v2
-
-    - name: Load cached dependencies
-      uses: actions/cache@v1
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
+        cache: true
+        cache-dependency-path: '**/go.sum'
 
     - name: Download Dependencies
-      run: go mod download
+      run: |
+        go mod download
+        (cd tools && go mod download)
+        (cd benchmarks && go mod download)
+        (cd zapgrpc/internal/test && go mod download)
 
     - name: Lint
       if: matrix.latest
@@ -46,7 +47,8 @@ jobs:
       run: make cover
 
     - name: Upload coverage to codecov.io
-      uses: codecov/codecov-action@v1
+      uses: codecov/codecov-action@v3
 
-    - name: Benchmark
-      run: make bench
+    - name: vulncheck
+      if: matrix.latest
+      run: make vulncheck

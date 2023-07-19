@@ -1,4 +1,4 @@
-// Copyright (c) 2016 Uber Technologies, Inc.
+// Copyright (c) 2016-2022 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,11 +22,12 @@ package zapcore_test
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"go.uber.org/atomic"
 	"go.uber.org/zap/internal/ztest"
 	. "go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -87,6 +88,19 @@ func TestSampler(t *testing.T) {
 	}
 }
 
+func TestLevelOfSampler(t *testing.T) {
+	levels := []Level{DebugLevel, InfoLevel, WarnLevel, ErrorLevel, DPanicLevel, PanicLevel, FatalLevel}
+	for _, lvl := range levels {
+		lvl := lvl
+		t.Run(lvl.String(), func(t *testing.T) {
+			t.Parallel()
+
+			sampler, _ := fakeSampler(lvl, time.Minute, 2, 3)
+			assert.Equal(t, lvl, LevelOf(sampler), "Sampler level did not match.")
+		})
+	}
+}
+
 func TestSamplerDisabledLevels(t *testing.T) {
 	sampler, logs := fakeSampler(InfoLevel, time.Minute, 1, 100)
 
@@ -144,7 +158,7 @@ func (c *countingCore) Check(ent Entry, ce *CheckedEntry) *CheckedEntry {
 }
 
 func (c *countingCore) Write(Entry, []Field) error {
-	c.logs.Inc()
+	c.logs.Add(1)
 	return nil
 }
 
@@ -158,49 +172,78 @@ func TestSamplerConcurrent(t *testing.T) {
 		numMessages   = 5
 		numTicks      = 25
 		numGoroutines = 10
+		tick          = 10 * time.Millisecond
+
+		// We'll make a total of,
+		// (numGoroutines * numTicks * logsPerTick * 2) log attempts
+		// with numMessages unique messages.
+		numLogAttempts = numGoroutines * logsPerTick * numTicks * 2
+		// Of those, we'll accept (logsPerTick * numTicks) entries
+		// for each unique message.
 		expectedCount = numMessages * logsPerTick * numTicks
+		// The rest will be dropped.
+		expectedDropped = numLogAttempts - expectedCount
 	)
 
-	tick := ztest.Timeout(10 * time.Millisecond)
+	clock := ztest.NewMockClock()
+
 	cc := &countingCore{}
-	sampler := NewSamplerWithOptions(cc, tick, logsPerTick, 100000)
 
-	var (
-		done atomic.Bool
-		wg   sync.WaitGroup
-	)
+	hook, dropped, sampled := makeSamplerCountingHook()
+	sampler := NewSamplerWithOptions(cc, tick, logsPerTick, 100000, SamplerHook(hook))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func(i int, ticker *time.Ticker) {
 			defer wg.Done()
+			defer ticker.Stop()
 
 			for {
-				if done.Load() {
+				select {
+				case <-stop:
 					return
-				}
-				msg := fmt.Sprintf("msg%v", i%numMessages)
-				ent := Entry{Level: DebugLevel, Message: msg, Time: time.Now()}
-				if ce := sampler.Check(ent, nil); ce != nil {
-					ce.Write()
-				}
 
-				// Give a chance for other goroutines to run.
-				time.Sleep(time.Microsecond)
+				case <-ticker.C:
+					for j := 0; j < logsPerTick*2; j++ {
+						msg := fmt.Sprintf("msg%v", i%numMessages)
+						ent := Entry{
+							Level:   DebugLevel,
+							Message: msg,
+							Time:    clock.Now(),
+						}
+						if ce := sampler.Check(ent, nil); ce != nil {
+							ce.Write()
+						}
+
+						// Give a chance for other goroutines to run.
+						runtime.Gosched()
+					}
+				}
 			}
-		}(i)
+		}(i, clock.NewTicker(tick))
 	}
 
-	time.AfterFunc(numTicks*tick, func() {
-		done.Store(true)
-	})
+	clock.Add(tick * numTicks)
+	close(stop)
 	wg.Wait()
 
-	assert.InDelta(
+	assert.Equal(
 		t,
 		expectedCount,
-		cc.logs.Load(),
-		expectedCount/10,
+		int(cc.logs.Load()),
 		"Unexpected number of logs",
+	)
+	assert.Equal(t,
+		expectedCount,
+		int(sampled.Load()),
+		"Unexpected number of logs sampled",
+	)
+	assert.Equal(t,
+		expectedDropped,
+		int(dropped.Load()),
+		"Unexpected number of logs dropped",
 	)
 }
 
@@ -243,4 +286,43 @@ func TestSamplerUnknownLevels(t *testing.T) {
 			assertSequence(t, logs.TakeAll(), lvl, 1, 2, 3, 4, 5, 6, 7, 8, 9)
 		})
 	}
+}
+
+func TestSamplerWithZeroThereafter(t *testing.T) {
+	var counter countingCore
+
+	// Logs two messages per second.
+	sampler := NewSamplerWithOptions(&counter, time.Second, 2, 0)
+
+	now := time.Now()
+
+	for i := 0; i < 1000; i++ {
+		ent := Entry{
+			Level:   InfoLevel,
+			Message: "msg",
+			Time:    now,
+		}
+		if ce := sampler.Check(ent, nil); ce != nil {
+			ce.Write()
+		}
+	}
+
+	assert.Equal(t, 2, int(counter.logs.Load()),
+		"Unexpected number of logs")
+
+	now = now.Add(time.Second)
+
+	for i := 0; i < 1000; i++ {
+		ent := Entry{
+			Level:   InfoLevel,
+			Message: "msg",
+			Time:    now,
+		}
+		if ce := sampler.Check(ent, nil); ce != nil {
+			ce.Write()
+		}
+	}
+
+	assert.Equal(t, 4, int(counter.logs.Load()),
+		"Unexpected number of logs")
 }

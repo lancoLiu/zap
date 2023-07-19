@@ -22,11 +22,11 @@ package zapcore_test
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/atomic"
 	"go.uber.org/zap/internal/ztest"
 	. "go.uber.org/zap/zapcore"
 )
@@ -236,9 +236,9 @@ func makeSamplerCountingHook() (func(_ Entry, dec SamplingDecision), *atomic.Int
 	sampledCount := new(atomic.Int64)
 	h := func(_ Entry, dec SamplingDecision) {
 		if dec&LogDropped > 0 {
-			droppedCount.Inc()
+			droppedCount.Add(1)
 		} else if dec&LogSampled > 0 {
-			sampledCount.Inc()
+			sampledCount.Add(1)
 		}
 	}
 	return h, droppedCount, sampledCount
@@ -274,10 +274,12 @@ func BenchmarkSampler_CheckWithHook(b *testing.B) {
 					}
 				}
 			})
+			// We expect to see 1000 dropped messages for every sampled per settings,
+			// with a delta due to less 1000 messages getting dropped after initial one
+			// is sampled.
+			assert.Greater(b, dropped.Load()/1000, sampled.Load()-1000)
+			dropped.Store(0)
+			sampled.Store(0)
 		})
 	}
-	// We expect to see 1000 dropped messages for every sampled per settings,
-	// with a delta due to less 1000 messages getting dropped after initial one
-	// is sampled.
-	assert.Greater(b, dropped.Load()/1000, sampled.Load()-1000)
 }

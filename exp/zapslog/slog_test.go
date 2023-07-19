@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2023 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -18,9 +18,31 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-// See #682 for more information.
-// +build !go1.12
+package zapslog
 
-package zap
+import (
+	"testing"
 
-const _stdLogDefaultDepth = 2
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/exp/slog"
+)
+
+func TestAddSource(t *testing.T) {
+	r := require.New(t)
+	fac, logs := observer.New(zapcore.DebugLevel)
+	sl := slog.New(HandlerOptions{
+		AddSource: true,
+	}.New(fac))
+	sl.Info("msg")
+
+	r.Len(logs.AllUntimed(), 1, "Expected exactly one entry to be logged")
+	entry := logs.AllUntimed()[0]
+	r.Equal("msg", entry.Entry.Message, "Unexpected message")
+	r.Regexp(
+		`/slog_test.go:\d+$`,
+		entry.Caller.String(),
+		"Unexpected caller annotation.",
+	)
+}

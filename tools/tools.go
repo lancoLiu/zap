@@ -18,12 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+//go:build tools
 // +build tools
 
 package tools
 
 import (
 	// Tools we use during development.
-	_ "golang.org/x/lint/golint"
+	_ "github.com/mgechev/revive"
+	_ "golang.org/x/vuln/cmd/govulncheck"
 	_ "honnef.co/go/tools/cmd/staticcheck"
 )

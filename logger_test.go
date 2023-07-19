@@ -23,6 +23,7 @@ package zap
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"go.uber.org/zap/internal/exit"
@@ -32,13 +33,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
 )
 
 func makeCountingHook() (func(zapcore.Entry) error, *atomic.Int64) {
 	count := &atomic.Int64{}
 	h := func(zapcore.Entry) error {
-		count.Inc()
+		count.Add(1)
 		return nil
 	}
 	return h, count
@@ -83,6 +83,33 @@ func TestLoggerAtomicLevel(t *testing.T) {
 	})
 }
 
+func TestLoggerLevel(t *testing.T) {
+	levels := []zapcore.Level{
+		DebugLevel,
+		InfoLevel,
+		WarnLevel,
+		ErrorLevel,
+		DPanicLevel,
+		PanicLevel,
+		FatalLevel,
+	}
+
+	for _, lvl := range levels {
+		lvl := lvl
+		t.Run(lvl.String(), func(t *testing.T) {
+			t.Parallel()
+
+			core, _ := observer.New(lvl)
+			log := New(core)
+			assert.Equal(t, lvl, log.Level())
+		})
+	}
+
+	t.Run("Nop", func(t *testing.T) {
+		assert.Equal(t, zapcore.InvalidLevel, NewNop().Level())
+	})
+}
+
 func TestLoggerInitialFields(t *testing.T) {
 	fieldOpts := opts(Fields(Int("foo", 42), String("bar", "baz")))
 	withLogger(t, DebugLevel, fieldOpts, func(logger *Logger, logs *observer.ObservedLogs) {
@@ -119,7 +146,8 @@ func TestLoggerLogPanic(t *testing.T) {
 		should   bool
 		expected string
 	}{
-		{func(logger *Logger) { logger.Check(PanicLevel, "bar").Write() }, true, "bar"},
+		{func(logger *Logger) { logger.Check(PanicLevel, "foo").Write() }, true, "foo"},
+		{func(logger *Logger) { logger.Log(PanicLevel, "bar") }, true, "bar"},
 		{func(logger *Logger) { logger.Panic("baz") }, true, "baz"},
 	} {
 		withLogger(t, DebugLevel, nil, func(logger *Logger, logs *observer.ObservedLogs) {
@@ -147,7 +175,8 @@ func TestLoggerLogFatal(t *testing.T) {
 		do       func(*Logger)
 		expected string
 	}{
-		{func(logger *Logger) { logger.Check(FatalLevel, "bar").Write() }, "bar"},
+		{func(logger *Logger) { logger.Check(FatalLevel, "foo").Write() }, "foo"},
+		{func(logger *Logger) { logger.Log(FatalLevel, "bar") }, "bar"},
 		{func(logger *Logger) { logger.Fatal("baz") }, "baz"},
 	} {
 		withLogger(t, DebugLevel, nil, func(logger *Logger, logs *observer.ObservedLogs) {
@@ -194,12 +223,36 @@ func TestLoggerLeveledMethods(t *testing.T) {
 	})
 }
 
+func TestLoggerLogLevels(t *testing.T) {
+	withLogger(t, DebugLevel, nil, func(logger *Logger, logs *observer.ObservedLogs) {
+		levels := []zapcore.Level{
+			DebugLevel,
+			InfoLevel,
+			WarnLevel,
+			ErrorLevel,
+			DPanicLevel,
+		}
+		for i, level := range levels {
+			logger.Log(level, "")
+			output := logs.AllUntimed()
+			assert.Equal(t, i+1, len(output), "Unexpected number of logs.")
+			assert.Equal(t, 0, len(output[i].Context), "Unexpected context on first log.")
+			assert.Equal(
+				t,
+				zapcore.Entry{Level: level},
+				output[i].Entry,
+				"Unexpected output from %s-level logger method.", level)
+		}
+	})
+}
+
 func TestLoggerAlwaysPanics(t *testing.T) {
 	// Users can disable writing out panic-level logs, but calls to logger.Panic()
 	// should still call panic().
 	withLogger(t, FatalLevel, nil, func(logger *Logger, logs *observer.ObservedLogs) {
 		msg := "Even if output is disabled, logger.Panic should always panic."
 		assert.Panics(t, func() { logger.Panic("foo") }, msg)
+		assert.Panics(t, func() { logger.Log(PanicLevel, "foo") }, msg)
 		assert.Panics(t, func() {
 			if ce := logger.Check(PanicLevel, "foo"); ce != nil {
 				ce.Write()
@@ -214,6 +267,9 @@ func TestLoggerAlwaysFatals(t *testing.T) {
 	// should still terminate the process.
 	withLogger(t, FatalLevel+1, nil, func(logger *Logger, logs *observer.ObservedLogs) {
 		stub := exit.WithStub(func() { logger.Fatal("") })
+		assert.True(t, stub.Exited, "Expected calls to logger.Fatal to terminate process.")
+
+		stub = exit.WithStub(func() { logger.Log(FatalLevel, "") })
 		assert.True(t, stub.Exited, "Expected calls to logger.Fatal to terminate process.")
 
 		stub = exit.WithStub(func() {
@@ -284,7 +340,8 @@ func TestLoggerNames(t *testing.T) {
 			}
 			log.Info("")
 			require.Equal(t, 1, logs.Len(), "Expected only one log entry to be written.")
-			assert.Equal(t, tt.expected, logs.AllUntimed()[0].Entry.LoggerName, "Unexpected logger name.")
+			assert.Equal(t, tt.expected, logs.AllUntimed()[0].LoggerName, "Unexpected logger name from entry.")
+			assert.Equal(t, tt.expected, log.Name(), "Unexpected logger name.")
 		})
 		withSugar(t, DebugLevel, nil, func(log *SugaredLogger, logs *observer.ObservedLogs) {
 			for _, n := range tt.names {
@@ -292,7 +349,8 @@ func TestLoggerNames(t *testing.T) {
 			}
 			log.Infow("")
 			require.Equal(t, 1, logs.Len(), "Expected only one log entry to be written.")
-			assert.Equal(t, tt.expected, logs.AllUntimed()[0].Entry.LoggerName, "Unexpected logger name.")
+			assert.Equal(t, tt.expected, logs.AllUntimed()[0].LoggerName, "Unexpected logger name from entry.")
+			assert.Equal(t, tt.expected, log.base.Name(), "Unexpected logger name.")
 		})
 	}
 }
@@ -345,8 +403,8 @@ func TestLoggerAddCaller(t *testing.T) {
 		{opts(AddCaller(), WithCaller(false)), `^undefined$`},
 		{opts(WithCaller(true)), `.+/logger_test.go:[\d]+$`},
 		{opts(WithCaller(true), WithCaller(false)), `^undefined$`},
-		{opts(AddCaller(), AddCallerSkip(1), AddCallerSkip(-1)), `.+/zap/logger_test.go:[\d]+$`},
-		{opts(AddCaller(), AddCallerSkip(1)), `.+/zap/common_test.go:[\d]+$`},
+		{opts(AddCaller(), AddCallerSkip(1), AddCallerSkip(-1)), `.+/logger_test.go:[\d]+$`},
+		{opts(AddCaller(), AddCallerSkip(1)), `.+/common_test.go:[\d]+$`},
 		{opts(AddCaller(), AddCallerSkip(1), AddCallerSkip(3)), `.+/src/runtime/.*:[\d]+$`},
 	}
 	for _, tt := range tests {
@@ -359,7 +417,7 @@ func TestLoggerAddCaller(t *testing.T) {
 			assert.Regexp(
 				t,
 				tt.pat,
-				output[0].Entry.Caller,
+				output[0].Caller,
 				"Expected to find package name and file name in output.",
 			)
 		})
@@ -432,14 +490,14 @@ func TestLoggerAddCallerFunction(t *testing.T) {
 				assert.Regexp(
 					t,
 					tt.loggerFunction,
-					entry.Entry.Caller.Function,
+					entry.Caller.Function,
 					"Expected to find function name in output.",
 				)
 			}
 			assert.Regexp(
 				t,
 				tt.sugaredFunction,
-				entries[1].Entry.Caller.Function,
+				entries[1].Caller.Function,
 				"Expected to find function name in output.",
 			)
 		})
@@ -458,12 +516,12 @@ func TestLoggerAddCallerFail(t *testing.T) {
 		)
 		assert.Equal(
 			t,
-			logs.AllUntimed()[0].Entry.Message,
+			logs.AllUntimed()[0].Message,
 			"Failure.",
 			"Expected original message to survive failures in runtime.Caller.")
 		assert.Equal(
 			t,
-			logs.AllUntimed()[0].Entry.Caller.Function,
+			logs.AllUntimed()[0].Caller.Function,
 			"",
 			"Expected function name to be empty string.")
 	})
@@ -489,7 +547,7 @@ func TestLoggerIncreaseLevel(t *testing.T) {
 		require.Equal(t, 2, logs.Len(), "expected only warn + error logs due to IncreaseLevel.")
 		assert.Equal(
 			t,
-			logs.AllUntimed()[0].Entry.Message,
+			logs.AllUntimed()[0].Message,
 			"logger.Warn",
 			"Expected first logged message to be warn level message",
 		)
@@ -533,6 +591,17 @@ func TestLoggerConcurrent(t *testing.T) {
 			)
 		}
 	})
+}
+
+func TestLoggerFatalOnNoop(t *testing.T) {
+	exitStub := exit.Stub()
+	defer exitStub.Unstub()
+	core, _ := observer.New(InfoLevel)
+
+	// We don't allow a no-op fatal hook.
+	New(core, WithFatalHook(zapcore.WriteThenNoop)).Fatal("great sadness")
+	assert.True(t, exitStub.Exited, "must exit for WriteThenNoop")
+	assert.Equal(t, 1, exitStub.Code, "must exit with status 1 for WriteThenNoop")
 }
 
 func TestLoggerCustomOnFatal(t *testing.T) {
@@ -579,6 +648,23 @@ func TestLoggerCustomOnFatal(t *testing.T) {
 	}
 }
 
+type customWriteHook struct {
+	called bool
+}
+
+func (h *customWriteHook) OnWrite(_ *zapcore.CheckedEntry, _ []Field) {
+	h.called = true
+}
+
+func TestLoggerWithFatalHook(t *testing.T) {
+	var h customWriteHook
+	withLogger(t, InfoLevel, opts(WithFatalHook(&h)), func(logger *Logger, logs *observer.ObservedLogs) {
+		logger.Fatal("great sadness")
+		assert.True(t, h.called)
+		assert.Equal(t, 1, logs.FilterLevelExact(FatalLevel).Len())
+	})
+}
+
 func TestNopLogger(t *testing.T) {
 	logger := NewNop()
 
@@ -597,6 +683,16 @@ func TestNopLogger(t *testing.T) {
 		assert.Panics(t, func() {
 			logger.Panic("great sadness")
 		}, "Nop logger should still cause panics.")
+	})
+}
+
+func TestMust(t *testing.T) {
+	t.Run("must without an error does not panic", func(t *testing.T) {
+		assert.NotPanics(t, func() { Must(NewNop(), nil) }, "must paniced with no error")
+	})
+
+	t.Run("must with an error panics", func(t *testing.T) {
+		assert.Panics(t, func() { Must(nil, errors.New("an error")) }, "must did not panic with an error")
 	})
 }
 
