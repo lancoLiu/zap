@@ -358,3 +358,101 @@ func ExampleWrapCore_wrap() {
 	// {"level":"info","msg":"doubled"}
 	// {"level":"info","msg":"doubled"}
 }
+
+func ExampleDict() {
+	logger := zap.NewExample()
+	defer logger.Sync()
+
+	logger.Info("login event",
+		zap.Dict("event",
+			zap.Int("id", 123),
+			zap.String("name", "jane"),
+			zap.String("status", "pending")))
+	// Output:
+	// {"level":"info","msg":"login event","event":{"id":123,"name":"jane","status":"pending"}}
+}
+
+func ExampleObjects() {
+	logger := zap.NewExample()
+	defer logger.Sync()
+
+	// Use the Objects field constructor when you have a list of objects,
+	// all of which implement zapcore.ObjectMarshaler.
+	logger.Debug("opening connections",
+		zap.Objects("addrs", []addr{
+			{IP: "123.45.67.89", Port: 4040},
+			{IP: "127.0.0.1", Port: 4041},
+			{IP: "192.168.0.1", Port: 4042},
+		}))
+	// Output:
+	// {"level":"debug","msg":"opening connections","addrs":[{"ip":"123.45.67.89","port":4040},{"ip":"127.0.0.1","port":4041},{"ip":"192.168.0.1","port":4042}]}
+}
+
+func ExampleDictObject() {
+	logger := zap.NewExample()
+	defer logger.Sync()
+
+	// Use DictObject to create zapcore.ObjectMarshaler implementations from Field arrays,
+	// then use the Object and Objects field constructors to turn them back into a Field.
+
+	logger.Debug("worker received job",
+		zap.Object("w1",
+			zap.DictObject(
+				zap.Int("id", 402000),
+				zap.String("description", "compress image data"),
+				zap.Int("priority", 3),
+			),
+		))
+
+	d1 := 68 * time.Millisecond
+	d2 := 79 * time.Millisecond
+	d3 := 57 * time.Millisecond
+
+	logger.Info("worker status checks",
+		zap.Objects("job batch enqueued",
+			[]zapcore.ObjectMarshaler{
+				zap.DictObject(
+					zap.String("worker", "w1"),
+					zap.Int("load", 419),
+					zap.Duration("latency", d1),
+				),
+				zap.DictObject(
+					zap.String("worker", "w2"),
+					zap.Int("load", 520),
+					zap.Duration("latency", d2),
+				),
+				zap.DictObject(
+					zap.String("worker", "w3"),
+					zap.Int("load", 310),
+					zap.Duration("latency", d3),
+				),
+			},
+		))
+	// Output:
+	// {"level":"debug","msg":"worker received job","w1":{"id":402000,"description":"compress image data","priority":3}}
+	// {"level":"info","msg":"worker status checks","job batch enqueued":[{"worker":"w1","load":419,"latency":"68ms"},{"worker":"w2","load":520,"latency":"79ms"},{"worker":"w3","load":310,"latency":"57ms"}]}
+}
+
+func ExampleObjectValues() {
+	logger := zap.NewExample()
+	defer logger.Sync()
+
+	// Use the ObjectValues field constructor when you have a list of
+	// objects that do not implement zapcore.ObjectMarshaler directly,
+	// but on their pointer receivers.
+	logger.Debug("starting tunnels",
+		zap.ObjectValues("addrs", []request{
+			{
+				URL:    "/foo",
+				Listen: addr{"127.0.0.1", 8080},
+				Remote: addr{"123.45.67.89", 4040},
+			},
+			{
+				URL:    "/bar",
+				Listen: addr{"127.0.0.1", 8080},
+				Remote: addr{"127.0.0.1", 31200},
+			},
+		}))
+	// Output:
+	// {"level":"debug","msg":"starting tunnels","addrs":[{"url":"/foo","ip":"127.0.0.1","port":8080,"remote":{"ip":"123.45.67.89","port":4040}},{"url":"/bar","ip":"127.0.0.1","port":8080,"remote":{"ip":"127.0.0.1","port":31200}}]}
+}
